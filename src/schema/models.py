@@ -19,6 +19,8 @@ class OpenAIModelName(StrEnum):
 
     GPT_4O_MINI = "gpt-4o-mini"
     GPT_4O = "gpt-4o"
+    GPT_O1_MINI = "o1-mini"
+    GPT_O1 = "o1"
 
 
 class AzureOpenAIModelName(StrEnum):

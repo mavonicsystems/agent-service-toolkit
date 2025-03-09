@@ -1,9 +1,5 @@
 from datetime import datetime
-from typing import Literal, Dict, List, TypedDict, Any
-from langchain.output_parsers import PydanticOutputParser
-from pydantic import BaseModel, Field
-from operator import add
-from functools import partial
+from typing import Literal
 
 from langchain_community.tools import DuckDuckGoSearchResults, OpenWeatherMapQueryRun
 from langchain_community.utilities import OpenWeatherMapAPIWrapper
@@ -22,329 +18,202 @@ from agents.blogs_agent.tools import send_markdown_to_api
 
 
 class AgentState(MessagesState, total=False):
-    """`total=False` is PEP589 specs.
-
-    documentation: https://typing.readthedocs.io/en/latest/spec/typeddict.html#totality
-    """
-
+    """State for blog writing process"""
     safety: LlamaGuardOutput
     remaining_steps: RemainingSteps
-
-
-class BlogSection(BaseModel):
-    """Schema for a blog section"""
-    title: str = Field(description="Title of the section")
-    key_points: List[str] = Field(description="Key points to cover in this section")
-
-class BlogPlan(BaseModel):
-    """Schema for the blog plan"""
-    title: str = Field(description="Main title of the blog")
-    sections: List[BlogSection] = Field(description="List of sections to write")
-
-class BlogState(AgentState, total=False):
-    """State for blog writing agent"""
-    safety: LlamaGuardOutput
-    remaining_steps: RemainingSteps
-    plan: BlogPlan
-    section_contents: Dict[str, str]
-    final_blog: str
+    user_message: str  # Store original user request
+    coordinator_message: str  # Store coordinator's acknowledgment
+    planner_message: str  # Store planner's outline
+    research_message: str  # Store research findings
+    writer_message: str  # Store written content
+    reviewer_message: str  # Store review feedback
+    final_blog: str  # Store final blog content ready for publishing
 
 
 web_search = DuckDuckGoSearchResults(name="WebSearch")
-tools = [web_search, calculator, send_markdown_to_api]
+
+research_tools = [web_search]
+
+final_result_tools = [send_markdown_to_api]
 
 # Add weather tool if API key is set
 # Register for an API key at https://openweathermap.org/api/
-if settings.OPENWEATHERMAP_API_KEY:
-    wrapper = OpenWeatherMapAPIWrapper(
-        openweathermap_api_key=settings.OPENWEATHERMAP_API_KEY.get_secret_value()
-    )
-    tools.append(OpenWeatherMapQueryRun(name="Weather", api_wrapper=wrapper))
+# if settings.OPENWEATHERMAP_API_KEY:
+#     wrapper = OpenWeatherMapAPIWrapper(
+#         openweathermap_api_key=settings.OPENWEATHERMAP_API_KEY.get_secret_value()
+#     )
+#     tools.append(OpenWeatherMapQueryRun(name="Weather", api_wrapper=wrapper))
 
 current_date = datetime.now().strftime("%B %d, %Y")
 instructions = f"""
-    You are a helpful research assistant with the ability to search the web, use tools, and publish blog posts.
+    You are a coordinator for the blog writing process. Your role is to understand the user's blog request and pass it to the planning stage.
     Today's date is {current_date}.
 
     NOTE: THE USER CAN'T SEE THE TOOL RESPONSE.
 
-    A few things to remember:
-    - Please include markdown-formatted links to any citations used in your response. Only include one
-    or two citations per response unless more are needed. ONLY USE LINKS RETURNED BY THE TOOLS.
-    - Use calculator tool with numexpr to answer math questions. The user does not understand numexpr,
-      so for the final response, use human readable format - e.g. "300 * 200", not "(300 \\times 200)".
-    - After writing a blog post, use the send_markdown_to_api tool to publish it.
+    Your job is to:
+    1. Listen to the user's blog request
+    2. Forward the request to the planner for detailed outlining and strategy
+    3. Let the planner handle the content planning
+    4. Do not attempt to do the planning, research, writing or review yourself
+    
+    The specialized agents will handle:
+    - Planner: Creates outlines and content strategies
+    - Researcher: Gathers sources and statistics
+    - Writer: Produces the blog content
+    - Reviewer: Checks quality and optimization
+
+    Simply understand what blog post the user wants and pass that request to the planner node.
+    """
+
+planner_instructions = f"""
+    You are a blog post planner responsible for creating research plans and outlines. Your role is to analyze the blog request and create a plan for the researcher to follow.
+    Today's date is {current_date}.
+
+    Your role is to:
+    1. Break down the blog topic into key research areas
+    2. Identify specific questions that need to be investigated
+    3. Specify what types of sources and information the researcher should look for
+    4. Create a clear research plan with priorities
+    5. Note any special considerations for the research (time period, geography, industry focus)
+    
+    NOTE: THE USER CAN'T SEE THE TOOL RESPONSE.
+
+    Do not conduct research yourself. Focus only on creating a clear research plan for the researcher to follow.
+    Once you've created the research plan, pass it to the researcher agent who will execute the plan.
+    """
+
+researcher_instructions = f"""
+    You are a blog post researcher responsible for finding relevant sources and statistics to support the content.
+    Today's date is {current_date}.
+
+    Your role is to:
+    1. Conduct thorough research on the given topic
+    2. Find and analyze relevant sources and statistics
+    3. Verify facts from multiple sources when possible
+    4. Include markdown-formatted links to citations from authoritative sources
+    5. Only use links returned by the search tools
+    6. Focus on recent, relevant information that adds value
+    7. Provide detailed notes on the research process and sources used
+
+    NOTE: THE USER CAN'T SEE THE TOOL RESPONSE.
+
+    Create thorough research reports that will inform the writing process and ensure the content is well-supported and credible.
+    """
+
+writer_instructions = f"""
+    You are a blog post writer responsible for producing engaging, well-structured blog posts optimized for SEO.
+    Today's date is {current_date}.
+
+    STRICT WRITING REQUIREMENTS:
+    1. Language and Accessibility:
+       - Use simple, clear language (aim for 8th-grade reading level)
+       - Break down complex concepts into simple terms
+       - Avoid jargon unless absolutely necessary
+       - When using technical terms, provide immediate explanations
+    
+    2. Schema and Metadata:
+       - Add schema.org tags for blog posts
+       - Include meta description (150-160 characters)
+       - Add title tags with primary keyword
+       - Use proper heading hierarchy (H1 for title, H2 for sections, H3 for subsections)
+       - Add alt text for any images mentioned
+    
+    3. Citations and References:
+       - Add hyperlinks for:
+         * Technical terms that need explanation
+         * Statistics and facts
+         * Quoted material
+         * Complex concepts
+       - Link to Wikipedia for general knowledge terms
+       - Use markdown format: [term](url)
+       - Always attribute sources inline
+    
+    4. Content Structure:
+       - Keep paragraphs short (3-4 sentences maximum)
+       - Use bullet points for lists
+       - Include subheadings every 300 words
+       - Bold important concepts
+       - Use tables for comparing information
+    
+    5. SEO Optimization:
+       - Include primary keyword in first paragraph
+       - Use LSI keywords naturally throughout
+       - Optimize image names and alt text
+       - Create internal linking opportunities
+    
+    Follow the research findings exactly and maintain the planned structure.
+    Do not add information that wasn't in the research.
     """
 
 
-def wrap_model(model: BaseChatModel) -> RunnableSerializable[AgentState, AIMessage]:
-    model = model.bind_tools(tools)
-    preprocessor = RunnableLambda(
-        lambda state: [SystemMessage(content=instructions)] + state["messages"],
-        name="StateModifier",
-    )
-    return preprocessor | model
+reviewer_instructions = f"""
+    You are a strict blog post reviewer responsible for ensuring high-quality, well-researched content.
+    Today's date is {current_date}.
 
-
-def format_safety_message(safety: LlamaGuardOutput) -> AIMessage:
-    content = (
-        f"This conversation was flagged for unsafe content: {', '.join(safety.unsafe_categories)}"
-    )
-    return AIMessage(content=content)
-
-
-async def acall_model(state: AgentState, config: RunnableConfig) -> AgentState:
-    m = get_model(config["configurable"].get("model", settings.DEFAULT_MODEL))
-    model_runnable = wrap_model(m)
-    response = await model_runnable.ainvoke(state, config)
-
-    # Run llama guard check here to avoid returning the message if it's unsafe
-    llama_guard = LlamaGuard()
-    safety_output = await llama_guard.ainvoke("Agent", state["messages"] + [response])
-    if safety_output.safety_assessment == SafetyAssessment.UNSAFE:
-        return {"messages": [format_safety_message(safety_output)], "safety": safety_output}
-
-    if state["remaining_steps"] < 2 and response.tool_calls:
-        return {
-            "messages": [
-                AIMessage(
-                    id=response.id,
-                    content="Sorry, need more steps to process this request.",
-                )
-            ]
-        }
-    # We return a list, because this will get added to the existing list
-    return {"messages": [response]}
-
-
-async def llama_guard_input(state: AgentState, config: RunnableConfig) -> AgentState:
-    llama_guard = LlamaGuard()
-    safety_output = await llama_guard.ainvoke("User", state["messages"])
-    return {"safety": safety_output}
-
-
-async def block_unsafe_content(state: AgentState, config: RunnableConfig) -> AgentState:
-    safety: LlamaGuardOutput = state["safety"]
-    return {"messages": [format_safety_message(safety)]}
-
-
-async def plan_blog(state: BlogState, config: RunnableConfig) -> BlogState:
-    """Plan the blog sections"""
-    planning_prompt = """
-    Based on the user's request, create a detailed blog post plan.
-    Break it down into logical sections that can be written independently.
+    REVIEW PROCESS:
+    1. Planning Review (Score 0-1):
+       - Compare final content against user's original request
+       - Verify all requested topics are covered
+       - Check if the structure serves the intended purpose
+       - Assess if the depth matches user expectations
+       Score based on: completeness, relevance, and structure
     
-    Format the output as JSON matching this schema:
-    {
-        "title": "Main blog title",
-        "sections": [
-            {
-                "title": "Section title",
-                "key_points": ["point 1", "point 2", "point 3"]
-            }
-        ]
-    }
+    2. Research Quality Check (Score 0-1):
+       - Verify all facts and statistics have sources
+       - Check recency and relevance of sources
+       - Ensure research covers all planned topics
+       - Look for gaps in information
+       Score based on: accuracy, completeness, and source quality
     
-    Requirements:
-    - Create 3-5 sections
-    - Each section should have 2-4 key points
-    - Make sections logically connected but independently writable
+    3. Writing Assessment (Score 0-1):
+       Language and Accessibility:
+       - Check reading level (should be 8th grade or simpler)
+       - Look for unexplained jargon or technical terms
+       - Verify all complex terms have explanations
+       - Ensure clear, simple language throughout
+       Score based on: clarity, SEO optimization, and technical accuracy
+    
+    4. Final Assessment:
+       Calculate the final score as average of all three scores.
+       
+       You MUST provide your review in this format:
+       ```review
+       SCORES:
+       Planning: <score 0-1> - <brief reason>
+       Research: <score 0-1> - <brief reason>
+       Writing: <score 0-1> - <brief reason>
+       Overall: <calculated_average>
+
+       DETAILED FEEDBACK:
+       [Your detailed feedback here...]
+
+       VERDICT: [APPROVED or NEEDS_REVISION]
+       TARGET: [PLANNING or RESEARCH or WRITING]
+       ```
+
+    Scoring Guidelines:
+    - 0.0-0.3: Major issues, needs complete revision
+    - 0.4-0.5: Significant issues, needs substantial revision
+    - 0.6-0.7: Minor issues, needs some improvements
+    - 0.8-1.0: Good to excellent, ready for publication
+
+    APPROVAL CRITERIA:
+    - Overall score must be >= 0.8 for automatic approval
+    - No individual score should be < 0.6
+    - All required elements must be present
+
+    If not approved, clearly indicate which component needs the most attention using the TARGET field.
     """
-    
-    m = get_model(config["configurable"].get("model", settings.DEFAULT_MODEL))
-    parser = PydanticOutputParser(pydantic_object=BlogPlan)
-    
-    # First get the model's response
-    response = await m.ainvoke(
-        [
-            SystemMessage(content=planning_prompt),
-            SystemMessage(content=f"Output format instructions: {parser.get_format_instructions()}"),
-        ] + state["messages"],
-        config
-    )
-    
-    # Then parse the response into our BlogPlan structure
-    try:
-        plan = parser.parse(response.content)
-        return {"plan": plan}
-    except Exception as e:
-        # If parsing fails, return an error message
-        return {
-            "messages": [
-                AIMessage(content=f"Failed to create blog plan: {str(e)}\nResponse was: {response.content}")
-            ]
-        }
 
+final_result_instructions = f"""
+    You are a content preparation assistant. Your role is to take the final blog content and prepare it for publication.
 
-async def write_sections(state: BlogState, config: RunnableConfig) -> BlogState:
-    """Write all blog sections sequentially"""
-    m = get_model(config["configurable"].get("model", settings.DEFAULT_MODEL))
-    sections_content = {}
-    
-    # First, create a context of the overall blog structure
-    blog_context = f"""
-    You are writing a blog post titled: "{state['plan'].title}"
-    
-    The blog has the following sections:
-    {chr(10).join(f'- {section.title}' for section in state['plan'].sections)}
+    Don't rewrite the content. Just create title, description, category and other tool's input parameters and call the tool.
+
+    Below is the blog content.
     """
-    
-    for i, section in enumerate(state["plan"].sections):
-        # Add context about previously written sections
-        previous_sections = ""
-        if i > 0:
-            previous_sections = "\nPreviously written sections:\n"
-            for prev_section in state["plan"].sections[:i]:
-                if prev_section.title in sections_content:
-                    previous_sections += f"\n## {prev_section.title}\n{sections_content[prev_section.title]}\n"
-        
-        writing_prompt = f"""
-        {blog_context}
-        
-        {previous_sections}
-        
-        Now, write the following section:
-        
-        SECTION TITLE: {section.title}
-        
-        KEY POINTS TO COVER:
-        {chr(10).join(f'- {point}' for point in section.key_points)}
-        
-        Write in a clear, engaging style. Use markdown formatting.
-        Make sure this section flows naturally from previous sections and maintains the blog's coherence.
-        Don't repeat information that was already covered in previous sections.
-        Focus on providing unique value in this section while maintaining the overall narrative.
-        """
-        
-        response = await m.ainvoke(
-            [SystemMessage(content=writing_prompt)] + state["messages"],
-            config
-        )
-        sections_content[section.title] = response.content
-    
-    return {"section_contents": sections_content}
 
-
-async def combine_sections(state: BlogState, config: RunnableConfig) -> BlogState:
-    """Combine all sections into final blog post"""
-    plan: BlogPlan = state["plan"]
-    sections: Dict[str, str] = state["section_contents"]
-    
-    # Start with just the content, no title (will be handled by the publishing tool)
-    final_blog = ""
-    for section in plan.sections:
-        if section.title in sections:
-            # Don't include the section title in the content since it's already in the markdown
-            content = sections[section.title]
-            # Remove any "## Section Title" that might be at the start of the content
-            content = content.replace(f"## {section.title}\n", "").replace(f"## {section.title}\r\n", "")
-            final_blog += f"\n## {section.title}\n\n{content}\n"
-    
-    return {"final_blog": final_blog, "messages": [AIMessage(content=final_blog)]}
-
-
-async def publish_blog(state: BlogState, config: RunnableConfig) -> BlogState:
-    """Publish the blog using the API tool"""
-    m = get_model(config["configurable"].get("model", settings.DEFAULT_MODEL))
-    model_runnable = wrap_model(m)
-    
-    # Calculate read time directly
-    word_count = len(state["final_blog"].split())
-    read_time = max(1, round(word_count / 238))  # minimum 1 minute, using standard 238 wpm
-    read_time_str = f"{read_time} minutes"
-    
-    # First, generate blog metadata
-    metadata_prompt = f"""
-    Based on the blog content, generate:
-    1. A concise but engaging description (2-3 sentences)
-    2. The most appropriate category for this blog from these options ONLY:
-       - Technology
-       - Business
-       - Science
-       - Health
-       - Lifestyle
-       - Education
-       - Opinion
-    
-    You MUST choose one of these exact category names, no variations allowed.
-    Format your response as a valid JSON object with no additional text:
-    {{
-        "description": "your description here",
-        "category": "category_name"
-    }}
-    """
-    
-    metadata_response = await m.ainvoke(
-        [SystemMessage(content=metadata_prompt)],
-        config
-    )
-    
-    try:
-        import json
-        # Extract JSON from markdown code block if present
-        content = metadata_response.content
-        if "```json" in content:
-            content = content.split("```json")[1].split("```")[0].strip()
-        elif "```" in content:
-            content = content.split("```")[1].split("```")[0].strip()
-            
-        metadata = json.loads(content)
-        # Validate category is one of the allowed values
-        allowed_categories = {"Technology", "Business", "Science", "Health", "Lifestyle", "Education", "Opinion"}
-        if metadata["category"] not in allowed_categories:
-            raise ValueError(f"Invalid category: {metadata['category']}")
-    except Exception as e:
-        print(f"Failed to parse or validate metadata: {e}\nResponse was: {metadata_response.content}")
-        metadata = {
-            "description": "An informative blog post about " + state['plan'].title,
-            "category": "Education"  # Default fallback
-        }
-    # Create the tool call prompt with explicit JSON structure
-    tool_call_data = {
-        "title": state['plan'].title,
-        "description": metadata['description'],
-        "content": state['final_blog'],
-        "read_time": read_time_str,
-        "category": metadata['category']
-    }
-    
-    publish_prompt = f"""
-    Use the send_markdown_to_api tool to publish this blog.
-    You MUST use EXACTLY these parameters, do not modify any values:
-    {json.dumps(tool_call_data, indent=2)}
-
-    Make the tool call with these exact parameters, no modifications allowed.
-    Do not add any additional text before or after the tool call.
-    """
-    
-    # Create a proper state with messages for the model
-    publish_state = {
-        "messages": [
-            SystemMessage(content=instructions),
-            SystemMessage(content=publish_prompt)
-        ]
-    }
-    
-    response = await model_runnable.ainvoke(publish_state, config)
-    
-    # If the model made a tool call, we need to process it
-    if response.tool_calls:
-        tool_node = ToolNode(tools)
-        tool_state = {"messages": [response]}
-        tool_result = await tool_node.ainvoke(tool_state, config)
-        
-        # Add both the tool call and its result to the messages
-        return {"messages": state["messages"] + [response] + tool_result["messages"]}
-    
-    # If no tool call was made, return an error message
-    return {
-        "messages": state["messages"] + [
-            AIMessage(content=f"Failed to publish the blog. Intended parameters were: {json.dumps(tool_call_data, indent=2)}")
-        ]
-    }
-
-
-# Check for unsafe input and block further processing if found
 def check_safety(state: AgentState) -> Literal["unsafe", "safe"]:
     safety: LlamaGuardOutput = state["safety"]
     match safety.safety_assessment:
@@ -353,44 +222,350 @@ def check_safety(state: AgentState) -> Literal["unsafe", "safe"]:
         case _:
             return "safe"
 
-# Define the graph
-agent = StateGraph(BlogState)
+def check_reviewer_feedback(state: AgentState) -> Literal["planner", "researcher", "writer", "final_result"]:
+    """Check reviewer feedback and determine next step based on scores"""
+    reviewer_message = state.get("reviewer_message", "")
+    
+    # Extract the review section
+    if "```review" in reviewer_message and "```" in reviewer_message.split("```review")[1]:
+        review_content = reviewer_message.split("```review")[1].split("```")[0].strip()
+    else:
+        print("Warning: Review not properly formatted")
+        return "writer"  # Default to writer if format is wrong
+    
+    # Extract scores
+    try:
+        # Parse scores
+        scores = {}
+        for line in review_content.split("\n"):
+            if "Planning:" in line:
+                scores["planning"] = float(line.split(":")[1].split("-")[0].strip())
+            elif "Research:" in line:
+                scores["research"] = float(line.split(":")[1].split("-")[0].strip())
+            elif "Writing:" in line:
+                scores["writing"] = float(line.split(":")[1].split("-")[0].strip())
+            elif "Overall:" in line:
+                scores["overall"] = float(line.split(":")[1].strip())
+        
+        # Extract verdict and target
+        verdict = "NEEDS_REVISION"
+        target = "WRITING"  # Default target
+        for line in review_content.split("\n"):
+            if "VERDICT:" in line:
+                verdict = line.split(":")[1].strip()
+            elif "TARGET:" in line:
+                target = line.split(":")[1].strip()
+        
+        # Decision logic
+        if verdict == "APPROVED" and scores["overall"] >= 0.8 and all(v >= 0.6 for v in scores.values()):
+            print(f"Review approved with scores: {scores}")
+            return "final_result"
+        
+        # Route based on lowest score and target
+        print(f"Review needs revision. Scores: {scores}, Target: {target}")
+        if target == "PLANNING":
+            return "planner"
+        elif target == "RESEARCH":
+            return "researcher"
+        else:
+            return "writer"
+            
+    except Exception as e:
+        print(f"Error parsing review: {e}")
+        return "writer"  # Default to writer if parsing fails
 
-# Add nodes
-agent.add_node("guard_input", llama_guard_input)
-agent.add_node("block_unsafe_content", block_unsafe_content)
-agent.add_node("planning", plan_blog)
-agent.add_node("write", write_sections)
-agent.add_node("combine", combine_sections)
-agent.add_node("publish", publish_blog)
-agent.add_node("model", acall_model)
-agent.add_node("tools", ToolNode(tools))
-
-# Set up the flow
-agent.set_entry_point("guard_input")
-
-# Add edges
-agent.add_conditional_edges(
-    "guard_input", check_safety, {"unsafe": "block_unsafe_content", "safe": "planning"}
-)
-agent.add_edge("block_unsafe_content", END)
-agent.add_edge("planning", "write")
-agent.add_edge("write", "combine")
-agent.add_edge("combine", "publish")
-agent.add_edge("publish", END)
-
-# Tool handling edges
-agent.add_edge("tools", "model")
-
-# After "model", if there are tool calls, run "tools". Otherwise END.
 def pending_tool_calls(state: AgentState) -> Literal["tools", "done"]:
-    last_message = state["messages"][-1]
-    if not isinstance(last_message, AIMessage):
-        raise TypeError(f"Expected AIMessage, got {type(last_message)}")
-    if last_message.tool_calls:
-        return "tools"
+    """Check if there are pending tool calls in the last message"""
+    # Get the last message that's an AIMessage
+    for message in reversed(state["messages"]):
+        if isinstance(message, AIMessage):
+            if message.tool_calls:
+                return "tools"
+            return "done"
+    
+    # If no AIMessage found, assume done
     return "done"
 
-agent.add_conditional_edges("model", pending_tool_calls, {"tools": "tools", "done": END})
+def format_safety_message(safety: LlamaGuardOutput) -> AIMessage:
+    """Format safety message for unsafe content"""
+    content = (
+        f"This conversation was flagged for unsafe content: {', '.join(safety.unsafe_categories)}"
+    )
+    return AIMessage(content=content)
+
+
+def wrap_model(model: BaseChatModel) -> RunnableSerializable[AgentState, AIMessage]:
+    """Default wrapper for the coordinator model"""
+    preprocessor = RunnableLambda(
+        lambda state: [AIMessage(content=instructions)] + state["messages"],
+        name="CoordinatorStateModifier",
+    )
+    return preprocessor | model
+
+async def llama_guard_input(state: AgentState, config: RunnableConfig) -> AgentState:
+    """Check input safety using LlamaGuard"""
+    llama_guard = LlamaGuard()
+    safety_output = await llama_guard.ainvoke("User", state["messages"])
+    return {"safety": safety_output}
+
+async def block_unsafe_content(state: AgentState, config: RunnableConfig) -> AgentState:
+    """Block processing if content is unsafe"""
+    safety: LlamaGuardOutput = state["safety"]
+    return {"messages": [format_safety_message(safety)]}
+
+def wrap_planner_model(model: BaseChatModel) -> RunnableSerializable[AgentState, AIMessage]:
+    """Wrapper for planner model"""
+    preprocessor = RunnableLambda(
+        lambda state: [AIMessage(content=planner_instructions)] + state["messages"],
+        name="PlannerStateModifier",
+    )
+    return preprocessor | model
+
+def wrap_researcher_model(model: BaseChatModel) -> RunnableSerializable[AgentState, AIMessage]:
+    """Wrapper for researcher model with research tools"""
+    model = model.bind_tools(research_tools)
+    preprocessor = RunnableLambda(
+        lambda state: [AIMessage(content=researcher_instructions)] + state["messages"],
+        name="ResearcherStateModifier",
+    )
+    return preprocessor | model
+
+def wrap_writer_model(model: BaseChatModel) -> RunnableSerializable[AgentState, AIMessage]:
+    """Wrapper for writer model"""
+    preprocessor = RunnableLambda(
+        lambda state: [AIMessage(content=writer_instructions)] + state["messages"],
+        name="WriterStateModifier",
+    )
+    return preprocessor | model
+
+def wrap_reviewer_model(model: BaseChatModel) -> RunnableSerializable[AgentState, AIMessage]:
+    """Wrapper for reviewer model"""
+    preprocessor = RunnableLambda(
+        lambda state: [AIMessage(content=reviewer_instructions)] + state["messages"],
+        name="ReviewerStateModifier",
+    )
+    return preprocessor | model
+
+def wrap_final_result_model(model: BaseChatModel) -> RunnableSerializable[AgentState, AIMessage]:
+    """Wrapper for final result model with publishing tools"""
+    model = model.bind_tools(final_result_tools)
+    preprocessor = RunnableLambda(
+        lambda state: [AIMessage(content=final_result_instructions)] + state["messages"],
+        name="FinalResultStateModifier",
+    )
+    return preprocessor | model
+
+async def acall_model(state: AgentState, config: RunnableConfig) -> AgentState:
+    """Coordinator model that processes initial request"""
+    m = get_model(config["configurable"].get("model", settings.DEFAULT_MODEL))
+    model_runnable = wrap_model(m)
+    
+    # Store user's message
+    user_message = state["messages"][-1].content
+    
+    response = await model_runnable.ainvoke(state, config)
+    
+    # Run safety check
+    llama_guard = LlamaGuard()
+    safety_output = await llama_guard.ainvoke("Agent", state["messages"] + [response])
+    if safety_output.safety_assessment == SafetyAssessment.UNSAFE:
+        return {"messages": [format_safety_message(safety_output)], "safety": safety_output}
+    
+    return {
+        "user_message": user_message,
+        "coordinator_message": response.content
+    }
+
+async def acall_planner(state: AgentState, config: RunnableConfig) -> AgentState:
+    """Planning node that creates the blog outline"""
+    m = get_model(config["configurable"].get("model", settings.DEFAULT_MODEL))
+    model_runnable = wrap_planner_model(m)
+    
+    # Include user's message and coordinator's response in context
+    planning_state = {
+        "messages": [
+            AIMessage(content=state["user_message"]),
+            AIMessage(content=state["coordinator_message"])
+        ]
+    }
+    
+    response = await model_runnable.ainvoke(planning_state, config)
+    
+    return {
+        "planner_message": response.content
+    }
+
+async def acall_researcher(state: AgentState, config: RunnableConfig) -> AgentState:
+    """Research node that gathers information"""
+    m = get_model(config["configurable"].get("model", settings.DEFAULT_MODEL))
+    model_runnable = wrap_researcher_model(m)
+    
+    # Include planning context
+    research_state = {
+        "messages": [
+            AIMessage(content=state["user_message"]),
+            AIMessage(content=state["planner_message"])
+        ]
+    }
+    
+    response = await model_runnable.ainvoke(research_state, config)
+    
+    if response.tool_calls:
+        tool_node = ToolNode(research_tools)
+        tool_state = {"messages": [response]}
+        tool_results = await tool_node.ainvoke(tool_state, config)
+        
+        # Get final response after tool use
+        new_state = {
+            "messages": research_state["messages"] + [response] + tool_results["messages"]
+        }
+        final_response = await model_runnable.ainvoke(new_state, config)
+        
+        return {
+            **state,
+            "research_message": final_response.content
+        }
+    
+    return {
+        **state,
+        "research_message": response.content
+    }
+
+async def acall_writer(state: AgentState, config: RunnableConfig) -> AgentState:
+    """Writing node that creates the content"""
+    m = get_model(config["configurable"].get("model", settings.DEFAULT_MODEL))
+    model_runnable = wrap_writer_model(m)
+    
+    # Include planning and research context
+    writer_state = {
+        "messages": [
+            AIMessage(content=state["user_message"]),
+            AIMessage(content=state["planner_message"]),
+            AIMessage(content=state["research_message"])
+        ]
+    }
+    
+    response = await model_runnable.ainvoke(writer_state, config)
+    
+    return {
+        **state,
+        "writer_message": response.content
+    }
+
+async def acall_reviewer(state: AgentState, config: RunnableConfig) -> AgentState:
+    """Review node that checks content quality"""
+    m = get_model(config["configurable"].get("model", settings.DEFAULT_MODEL))
+    model_runnable = wrap_reviewer_model(m)
+    
+    # Include all previous context
+    reviewer_state = {
+        "messages": [
+            AIMessage(content=state["user_message"]),
+            AIMessage(content=state["planner_message"]),
+            AIMessage(content=state["research_message"]),
+            AIMessage(content=state["writer_message"])
+        ]
+    }
+    
+    response = await model_runnable.ainvoke(reviewer_state, config)
+    
+    return {
+        **state,
+        "reviewer_message": response.content
+    }
+
+async def acall_final_result(state: AgentState, config: RunnableConfig) -> AgentState:
+    """Final node that publishes the blog"""
+    m = get_model(config["configurable"].get("model", settings.DEFAULT_MODEL))
+    model_runnable = wrap_final_result_model(m)
+    
+    # Prepare final blog content
+    final_blog = state["writer_message"]  # Use the reviewed and approved content
+    
+    final_state = {
+        "messages": [
+            AIMessage(content=state["reviewer_message"]),
+            AIMessage(content=f"Please prepare this content for publication:\n\n{final_blog}")
+        ]
+    }
+    
+    # Get the model's publishing preparation response
+    response = await model_runnable.ainvoke(final_state, config)
+
+    # Get the tool response
+    tool_response = await final_result_tools[0].ainvoke(response.content, config)
+    
+    # Get the final response after tool use
+    new_state = {
+        "messages": final_state["messages"] + [response] + tool_response["messages"]
+    }
+    final_response = await model_runnable.ainvoke(new_state, config)
+    
+    return {
+        **state,
+        "final_blog": final_response.content
+    }
+
+# Define the graph once at the top
+agent = StateGraph(AgentState)
+
+# Add all nodes
+agent.add_node("model", acall_model)
+agent.add_node("research_tools", ToolNode(research_tools))
+agent.add_node("final_result_tools", ToolNode(final_result_tools))
+agent.add_node("guard_input", llama_guard_input)
+agent.add_node("block_unsafe_content", block_unsafe_content)
+agent.add_node("planner", acall_planner)
+agent.add_node("researcher", acall_researcher)
+agent.add_node("writer", acall_writer)
+agent.add_node("reviewer", acall_reviewer)
+agent.add_node("final_result", acall_final_result)
+
+# Set entry point
+agent.set_entry_point("guard_input")
+
+# Add all edges in one place
+# Safety check edges
+agent.add_conditional_edges(
+    "guard_input", 
+    check_safety, 
+    {"unsafe": "block_unsafe_content", "safe": "model"}
+)
+agent.add_edge("block_unsafe_content", END)
+
+# Main flow edges
+agent.add_edge("model", "planner")
+agent.add_edge("planner", "researcher")
+agent.add_edge("researcher", "writer")
+agent.add_edge("writer", "reviewer")
+
+# Tool handling edges
+agent.add_edge("research_tools", "researcher")
+agent.add_edge("final_result_tools", "final_result")
+
+# Reviewer conditional edges
+agent.add_conditional_edges(
+    "reviewer",
+    check_reviewer_feedback,
+    {
+        "planner": "planner",
+        "researcher": "researcher",
+        "writer": "writer",
+        "final_result": "final_result"
+    }
+)
+
+# Tool call handling edges
+agent.add_conditional_edges(
+    "researcher", 
+    pending_tool_calls, 
+    {"tools": "research_tools", "done": "writer"}
+)
+
+agent.add_conditional_edges(
+    "final_result", 
+    pending_tool_calls, 
+    {"tools": "final_result_tools", "done": END}
+)
 
 blogs_agent = agent.compile(checkpointer=MemorySaver())

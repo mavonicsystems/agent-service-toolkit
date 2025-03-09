@@ -7,9 +7,10 @@ from agents.chatbot import chatbot
 from agents.command_agent import command_agent
 from agents.research_assistant import research_assistant
 from agents.blogs_agent.blogs_agent import blogs_agent
+from agents.foodstories.foodstories_agent import foodstories_agent
 from schema import AgentInfo
 
-DEFAULT_AGENT = "research-assistant"
+DEFAULT_AGENT = "foodstories-agent"
 
 
 @dataclass
@@ -26,6 +27,7 @@ agents: dict[str, Agent] = {
     "command-agent": Agent(description="A command agent.", graph=command_agent),
     "bg-task-agent": Agent(description="A background task agent.", graph=bg_task_agent),
     "blogs-agent": Agent(description="A blogs agent.", graph=blogs_agent),
+    "foodstories-agent": Agent(description="A foodstories agent.", graph=foodstories_agent),
 }
 
 
